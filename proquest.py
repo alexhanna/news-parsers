@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from nltk.metrics.distance import edit_distance
 
 SEP = "____________________________________________________________"
 META = r'([A-Z][A-Za-z- ]*?):'
@@ -15,14 +16,14 @@ META = r'([A-Z][A-Za-z- ]*?):'
 def parseProquest(filename):
     text = open(filename, 'r').read()
 
-    print(filename)
-
     # Figure out what metadata is being reported
     meta_list = list(set(re.findall('\\n' + META, text))) 
 
     ## set permanent columns
     header    = ['INTERNAL_ID', 'PUBLICATION', 'DATE', 'TITLE', 'EDITION']
-    today_str = datetime.today().strftime('%Y-%m-%d')
+
+    ## set publication title for null entries
+    pub_title = None
 
     # clean up crud at the beginning of the file
     text = text.replace('\xef\xbb\xbf','') 
@@ -43,12 +44,19 @@ def parseProquest(filename):
     skipped  = 0
     ## Begin loop over each article
     for i, f in enumerate(docs):
+        if len(f) == 0 or re.match('^Contact us at:', f):
+            continue
 
         meta_dict  = {k : '' for k in header}
 
         # Split into lines, and clean up the hard returns at the end of each line
         lines = [row.replace('\r\n', '<br/>').strip() for row in f.split('\r\n\r\n') if len(row) > 0]
+        
+        ## if it's still a big line, split by newlines
+        if len(lines) == 1:
+            lines = [row for row in f.split('\n\n') if len(row) > 0]
 
+        ## find the meta data
         for line in lines:
             metacheck = re.match('^' + META, line)
             if metacheck and metacheck.group(1) in meta_list:
@@ -58,6 +66,14 @@ def parseProquest(filename):
         if 'Title' not in meta_dict:
             skipped += 1
             continue
+
+        if 'Publication date' not in meta_dict:
+            if 'Publicationdate' in meta_dict:
+                meta_dict['Publication date'] = meta_dict['Publicationdate']
+                del meta_dict['Publicationdate']
+            else:       
+                print(meta_dict)
+                sys.exit()
 
         date = ''
         ## match date to different formats
@@ -113,24 +129,43 @@ def parseProquest(filename):
             matchobj = re.match(r'(\d{4})', meta_dict['Publication date'])
             date = datetime.strptime('Jan 1 ' + matchobj.group(1), '%b %d %Y')
         else:
-            raise ValueError("Date not valid: %s" % meta_dict['Publication date'])
+            print("WARNING: Date not valid: %s" % meta_dict['Publication date'])
+            continue
+
+        ## store publication title in case it's not in file
+        if 'Publication title' in meta_dict:
+            pub_title = meta_dict['Publication title']
 
         ## put everything in the metadata dictionary
-        meta_dict['PUBLICATION'] = meta_dict['Publication title']
-        meta_dict['DATE']        = date.strftime("%Y-%m-%d")
-        meta_dict['TITLE']       = meta_dict['Title']
+        meta_dict['PUBLICATION'] = pub_title
+        meta_dict['DATE'] = date.strftime("%Y-%m-%d")
+        meta_dict['TITLE'] = meta_dict['Title']
+        meta_dict['DOCSOURCE'] = "Proquest (%s)" % filename
 
         if 'Full text' in meta_dict:
             meta_dict['TEXT'] = meta_dict['Full text']
-            del meta_dict['Full text']
+            meta_dict['TEXT'] = '<br/>'.join(meta_dict['TEXT'].split('\n'))
+            del meta_dict['Full text']            
         else:
-            meta_dict['TEXT'] = ''
+            skipped += 1
+            continue
 
         if ids:
-            meta_dict['INTERNAL_ID'] = "%s_%s_%s" % (meta_dict['Publication title'], date, ids[i])
+            meta_dict['INTERNAL_ID'] = "%s_%s_%s" % (pub_title, date, ids[i])
         else:
-            meta_dict['INTERNAL_ID'] = "%s_%s_%s" % (meta_dict['Publication title'], date, i)
+            meta_dict['INTERNAL_ID'] = "%s_%s_%s" % (pub_title, date, i)
+
+        ## Solr doesn't seem to like this
+        if 'Pages' in meta_dict:
+            del meta_dict['Pages']
+
+        ## remove spaces
+        for field in ['Last updated', 'ProQuest document ID', 'ISSN', 'Publication year', 'Volume']:
+            if field in meta_dict:
+                meta_dict[field] = meta_dict[field].replace(' ', '')
+                meta_dict[field] = meta_dict[field].replace('X', '')
+            
         articles.append(meta_dict)
 
-    print("\tAdded %d articles. Skipped %d." % (len(articles), skipped))
+    print("\tAdded %d, Skipped %d." % (len(articles), skipped))
     return articles
