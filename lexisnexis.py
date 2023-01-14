@@ -10,6 +10,7 @@ alex.hanna@gmail.com
 Takes a downloaded plain text LexisNexis file and returns list of documents.
 """
 
+from docx import Document
 import os
 import re
 import sys
@@ -40,7 +41,93 @@ def isInt(x):
         return False
 
 
-def parseLexisNexis(filename, output = "."):
+def parseDate(date_ed):
+    ## format date into YYYY-MM-DD and edition if it exists 
+
+    ## NYT:      July 27 2008 Sunday                               Late Edition - Final
+    ## USATODAY: April 7, 1997, Monday, FINAL EDITION
+    ## WaPo:     June 06, 1996, Thursday, Final Edition
+    ## Corporate Counsel: June 2014
+    ## 04/30/2014
+    date_ed = date_ed.replace(',', '')
+    da      = re.split('\s+', date_ed)
+    da2     = re.split('/', date_ed)
+
+    if len(da) >= 3 and isInt(da[1]) and isInt(da[2]):
+        ## NYT, USA, WaPo
+        date = datetime.strptime(" ".join(da[0:3]), "%B %d %Y")
+    elif len(da) >= 2 and isInt(da[1]) and isMonth(da[0]):
+        ## Corporate Counsel: June 2014 Northeast
+        date = datetime.strptime(" ".join(da[0:2]), "%B %Y")
+    elif len(da2) > 2:
+        date = datetime.strptime(" ".join(da2[0:3]), "%m %d %Y")
+    else:
+        print("WARNING: Not a date: %s" % " ".join(da))
+        date = None
+
+    date = date.strftime("%Y-%m-%d")
+    ed   = " ".join( map(lambda x: x.strip(), da[4:]) )
+
+    ## if edition is a time or day, skip it      
+    if 'GMT' in ed or 'day' in ed:
+        ed = ''
+
+    return (date, ed)
+
+
+def parseIndividualLexisNexis(filename):
+    """ Parse individual docx Lexis-Nexis file."""
+    meta_dict = {}
+
+    ## get the title from the file name
+    title = filename.split('/')[-1].replace('.docx', '')
+    title = title.replace('_', ':')
+
+    try:
+        doc = Document(filename)    
+    except IOError:
+        return False 
+
+    paras = [x.text for x in filter(lambda x: len(x.text) > 0, doc.paragraphs)]
+
+    date, ed = parseDate(paras[1])
+
+    ## if there's no date, return empty record
+    if not date:
+        return None
+
+    pub = paras[0]
+    meta_dict['PUBLICATION'] = pub
+    meta_dict['DATE']        = date
+    meta_dict['TITLE']       = title
+    meta_dict['EDITION']     = ed
+
+    ## get the start and end index of the body paragraphs
+    ## which start with "Body" and end with "Classification"
+    start_index = 0
+    end_index = 0
+    for i, p in enumerate(paras):
+        if p == 'Body':
+            start_index = i+1
+        
+        if p == 'Classification':
+            end_index = i
+
+        ## Section:\xa0NEWS; Pg. 1
+        if re.match(r'Section:', p):
+            section = p.replace('Section:', '')
+            section = section.replace('\xa0', '')
+            meta_dict['SECTION'] = section
+
+    ## since JSON won't preserve escaped newlines
+    meta_dict['TEXT']        = "<br/>".join(paras[start_index:end_index])
+    meta_dict['INTERNAL_ID'] = "%s_%s_%s" % (pub, date, title)
+    meta_dict['DOCSOURCE']   = "Lexis-Nexis (%s)" % filename
+
+    return meta_dict
+
+
+def parseLexisNexis(filename):
     abstracts = []
     text = open(filename, 'r').read()
 
@@ -49,7 +136,6 @@ def parseLexisNexis(filename, output = "."):
 
     ## set permanent columns
     header    = ['INTERNAL_ID', 'PUBLICATION', 'DATE', 'TITLE', 'EDITION']
-    today_str = datetime.today().strftime('%Y-%m-%d')
 
     ## silly hack to find the end of the documents
     ## TK: This will break on abstracts
@@ -120,35 +206,10 @@ def parseLexisNexis(filename, output = "."):
         date_ed = lines[1].strip()
         title   = lines[2].strip()
 
-        ## format date into YYYY-MM-DD
-        ## NYT:      July 27 2008 Sunday                               Late Edition - Final
-        ## USATODAY: April 7, 1997, Monday, FINAL EDITION
-        ## WaPo:     June 06, 1996, Thursday, Final Edition
-        ## Corporate Counsel: June 2014
-        ## 04/30/2014
-
-        date_ed = date_ed.replace(',', '')
-        da      = re.split('\s+', date_ed)
-        da2     = re.split('/', date_ed)
-
-        if len(da) >= 3 and isInt(da[1]) and isInt(da[2]):
-            ## NYT, USA, WaPo
-            date = datetime.strptime(" ".join(da[0:3]), "%B %d %Y")
-        elif len(da) >= 2 and isInt(da[1]) and isMonth(da[0]):
-            ## Corporate Counsel: June 2014 Northeast
-            date = datetime.strptime(" ".join(da[0:2]), "%B %Y")
-        elif len(da2) > 2:
-            date = datetime.strptime(" ".join(da2[0:3]), "%m %d %Y")
-        else:
-            print("WARNING: Not a date: %s" % " ".join(da))
+        date, ed = parseDate(date_ed)
+        ## if there's no parsable date, go to next record
+        if not date:
             continue
-
-        date = date.strftime("%Y-%m-%d")
-        ed   = " ".join( map(lambda x: x.strip(), da[4:]) )
-
-        ## if edition is a time or day, skip it      
-        if 'GMT' in ed or 'day' in ed:
-            ed = ''
         
         ## Edit the text and other information
         paragraphs = []
